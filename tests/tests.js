@@ -1,10 +1,25 @@
-// An important principle is not to invoke tests manually (e.g. by typing the test's name, or even trying to use IIFEs), in case a test is defined but not called. In other words, defining the test in the right place should be enough to run it. That's why I've made an array of tests, and the name of their failing contract.
-
 // NOTE globals are for repl only, so can be changed back to consts if the repl is taken out (TODO make a separate script for playing with the contract interactively).
 
 // TODO show that if money leaves the payer it has to go to the payee and donee. E.g. it cannot get stuck in the contract.
-// ensure that payable functions have this property
 // ensure that payer is always sending to this contract
+
+// some tests can be done against the contract and the interface as one, others must be done against the contract directly.
+
+// When a payer tries to send payment, donee receives payment * donation percent (donation) and payee receives payment minus donation, or both receive nothing and payer loses nothing.
+
+// A payee can set their donation percent to 0 < p < 100%.
+// The donation percent is the percent of the payment that will be donated if:
+// // payment multiplied by donation percent is an integer and
+// // payment * num is not more than Solidity's maximum integer.
+// If the payee can change the donation percent through the interface, that means the interface has used the smart contract (as them), and therefore they could change the donation percent by using the contract directly if they wanted to.
+// p = 0
+// p = random number between 0 and 100 exclusive
+// p = 100
+
+// Only the payee can change their donation percent.
+// When the contract's on the blockchain, anyone can call it, so the test must call the contract's methods directly as a non-payee. All possible ways to change num or denom: call changeNum, changeDenom or changeNumAndDenom.
+
+// An important principle in this file is not to invoke tests manually (e.g. by typing the test's name, or even trying to use IIFEs), in case a test is defined but not called. In other words, defining the test in the right place should be enough to run it. That's why I've made an array of tests, and the name of their failing contract.
 
 const Web3 = require("web3");
 global.web3 = new Web3();
@@ -156,69 +171,71 @@ const flatten = require("lodash.flatten");
     return x > num && x != oldDenom ? x : randomNewDenom(oldDenom, num);
   };
 
-  const contractsAndTests = [
+  const mutantsAndTests = [
+    // Tests should fail against their mutant.
+
     // donee receives donation, payee receives payment minus donation
     // donee: x, payee: y -> donee: x + (p * d), payee: y + (p - (p * d)), where p > 0, 0 < d < 100% (p is payment, d is donation percent)
+
+    // (payment, donation) => contract => async () => { payment...; contract...; }
+    // tests.map(test => test())
 
     // p = 100, d = 1%
 
     {
-      name: "Y_donee_doesnt_receive_donation.sol",
+      mutant: "Y_donee_doesnt_receive_donation.sol",
       tests: [
-        async contract => {
-          const payment = 100;
+        { payment: 100 },
+        { payment: 1 }
+      ].map(({ payment }) => async contract => {
+        const numAndDenom = await Promise.all([
+          contract.methods.num().call(),
+          contract.methods.denom().call()
+        ]);
+        const donation = new BigNumber(numAndDenom[0]) // contract.methods.num().call() is returning a string, not a BigNumber (web3 v0 returned a BigNumber). Is that right?
+          .dividedBy(numAndDenom[1])
+          .times(payment);
+        const balancesBefore = await Promise.all([
+          web3.eth.getBalance(payee),
+          web3.eth.getBalance(donee)
+        ]);
+        const payeeBalanceBefore = new BigNumber(balancesBefore[0]);
+        const doneeBalanceBefore = new BigNumber(balancesBefore[1]);
 
-          const numAndDenom = await Promise.all([
-            contract.methods.num().call(),
-            contract.methods.denom().call()
-          ]);
-          const donation = new BigNumber(numAndDenom[0]) // contract.methods.num().call() is returning a string, not a BigNumber (web3 v0 returned a BigNumber). Is that right?
-            .dividedBy(numAndDenom[1])
-            .times(payment);
-          const balancesBefore = await Promise.all([
-            web3.eth.getBalance(payee),
-            web3.eth.getBalance(donee)
-          ]);
-          const payeeBalanceBefore = new BigNumber(balancesBefore[0]);
-          const doneeBalanceBefore = new BigNumber(balancesBefore[1]);
+        y.payAndDonate(payment, donee);
 
-          await contract.methods
-            .payAndDonate(donee)
-            .send({ from: payer, value: payment });
+        const balancesAfter = await Promise.all([
+          web3.eth.getBalance(payee),
+          web3.eth.getBalance(donee)
+        ]);
+        const payeeBalanceAfter = new BigNumber(balancesAfter[0]);
+        const doneeBalanceAfter = new BigNumber(balancesAfter[1]);
 
-          const balancesAfter = await Promise.all([
-            web3.eth.getBalance(payee),
-            web3.eth.getBalance(donee)
-          ]);
-          const payeeBalanceAfter = new BigNumber(balancesAfter[0]);
-          const doneeBalanceAfter = new BigNumber(balancesAfter[1]);
-
-          return {
-            test:
-              "donee receives donation, payee receives payment minus donation",
-            result:
-              payeeBalanceAfter.equals(
-                payeeBalanceBefore.plus(payment).minus(donation)
-              ) && doneeBalanceAfter.equals(doneeBalanceBefore.plus(donation))
-          };
-        }
-      ]
+        return {
+          test:
+            "Donee receives payment * donation percent (donation), and payee receives payment minus donation, unless payment * donation percent is not an integer or is bigger than Solidity's maximum integer.",
+          payment,
+          result:
+            payeeBalanceAfter.equals(
+              payeeBalanceBefore.plus(payment).minus(donation)
+            ) && doneeBalanceAfter.equals(doneeBalanceBefore.plus(donation))
+        };
+      })
     },
 
-    // p = 1, d = 50%: Tests like this have to be caught by Y.js until Solidity can handle them. If it fails here (which it will while Solidity can't represent decimals, e.g. 0.5), then test that Y.js can handle this (call to Y.js's tests).
+    // p = 1, d = 50%: First, check that this fails the test against Y.sol. If it doesn't, there's no need for Y.js to interfere. If it does fail, make the same call (payAndDonate) to Y.js. Y.js should stop you from calling Y.sol with values that would fail the test.
 
     // p = 100, d = 7.9%
     // p = 2^256 - 1, d = 8% (num: 2, denom: 25)
 
     // p > 0
 
-    // Non-payees can't change num or denom:
+    // A non-payee can't change a payee's donation percent.
 
     {
-      name: "Y_nonpayee_can_change_percent.sol",
+      mutant: "Y_nonpayee_can_change_percent.sol",
       tests: [
-        // num:
-
+        // "changeNum", "changeDenom", "changeNumAndDenom"].map((item) => {})
         async contract => {
           const numBefore = await contract.methods.num().call();
           const newNum = randomNewNum(
@@ -237,9 +254,6 @@ const flatten = require("lodash.flatten");
             )
           }; // ... but num after equals num before.
         },
-
-        // denom:
-
         async contract => {
           const denomBefore = await contract.methods.denom().call();
           try {
@@ -292,7 +306,7 @@ const flatten = require("lodash.flatten");
       ]
     },
     {
-      name: "Y_cant_change_percent.sol",
+      mutant: "Y_cant_change_percent.sol",
       tests: [
         // Payee can change num and denom
 
@@ -369,11 +383,11 @@ const flatten = require("lodash.flatten");
     const compiled = solc.compile(fs.readFileSync(filepath, "utf8"));
     const abi = compiled.contracts[":" + contractName].interface;
     const bytecode = compiled.contracts[":" + contractName].bytecode;
-    return async () =>
+    return async (num, denom) =>
       await new web3.eth.Contract(JSON.parse(abi))
         .deploy({
           data: bytecode,
-          arguments: [1, 100]
+          arguments: [num, denom]
         })
         .send({
           from: payee,
@@ -381,15 +395,20 @@ const flatten = require("lodash.flatten");
         });
   };
 
+  // compileThenDeploy must give us different contracts, each with different start values. The most flexible way to do this is with closures. But where is this flexibility needed? In getting the new tests, where the num and denom are different, into the existing tests. The runner passes down the compiled contract, just not with the num and denom. The tests are generated with their deployed contracts. The tests: property will be a function that returns an array of tests with the right contract each time.
+
   // test that every test can fail ("test the tests")
-  // Mutation testing shows that each test can fail. Run test against broken code. [{name, tests}]
+  // Mutation testing shows that each test can fail. Run test against broken code. [{mutant, tests}]
 
   const results = await Promise.all(
-    contractsAndTests.map(async contract => {
+    mutantsAndTests.map(async contract => {
       const contractForTest = await compileThenDeploy(
-        "./" + contract.name,
+        "./" + contract.mutant,
         "Y"
-      )();
+      )(
+        1,
+        100 // 1%
+      );
       return await Promise.all(
         contract.tests.map(async test => await test(contractForTest))
       );
@@ -403,7 +422,9 @@ const flatten = require("lodash.flatten");
     everyTestCanReturnFalse === true
       ? "Every test can fail."
       : "Not every test can fail (return false):",
-    everyTestCanReturnFalse === true ? "" : results
+    everyTestCanReturnFalse === true
+      ? ""
+      : flatten(results).filter(result => result.result === true)
   );
 
   // test Y
@@ -411,13 +432,13 @@ const flatten = require("lodash.flatten");
   const contractForTest = compileThenDeploy("../Y.sol", "Y"); // Y
 
   const tests = flatten(
-    contractsAndTests // [{name, tests},{name, tests}]
+    mutantsAndTests // [{mutant, tests},{mutant, tests}]
       .map(contract => contract.tests) // [tests, tests]
   ); // [tests]
 
   const results2 = await Promise.all(
-    tests.map(async (test, index) => {
-      return await test(await contractForTest());
+    tests.map(async test => {
+      return await test(await contractForTest(1, 100)); // Not sure if both awaits necessary or not.
     })
   );
 
@@ -425,7 +446,63 @@ const flatten = require("lodash.flatten");
     result => result.result === true
   );
 
-  console.log(everyTestResultIsTrue ? "Every test passed." : results2);
+  console.log(
+    everyTestResultIsTrue
+      ? "Every test passed."
+      : "Not every test passed (returned true): " +
+        JSON.stringify(results2.filter(result => result.result === false))
+  );
   // global.contract = contractForTest;
   // require("repl").start();
+  // console.log(
+  //   await Promise.all(
+  //     [
+  //       { payment: 1, donationPercent: { num: 1, denom: 2 } },
+  //       { payment: 100, donationPercent: { num: 79, denom: 1000 } }
+  //     ].map(async ({ payment, donationPercent }) =>
+  //       (payment => async contract => {
+  //         const numAndDenom = await Promise.all([
+  //           contract.methods.num().call(),
+  //           contract.methods.denom().call()
+  //         ]);
+  //         const donation = new BigNumber(numAndDenom[0]) // contract.methods.num().call() is returning a string, not a BigNumber (web3 v0 returned a BigNumber). Is that right?
+  //           .dividedBy(numAndDenom[1])
+  //           .times(payment);
+  //         const balancesBefore = await Promise.all([
+  //           web3.eth.getBalance(payee),
+  //           web3.eth.getBalance(donee)
+  //         ]);
+  //         const payeeBalanceBefore = new BigNumber(balancesBefore[0]);
+  //         const doneeBalanceBefore = new BigNumber(balancesBefore[1]);
+  //
+  //         await contract.methods
+  //           .payAndDonate(donee)
+  //           .send({ from: payer, value: payment });
+  //
+  //         const balancesAfter = await Promise.all([
+  //           web3.eth.getBalance(payee),
+  //           web3.eth.getBalance(donee)
+  //         ]);
+  //         const payeeBalanceAfter = new BigNumber(balancesAfter[0]);
+  //         const doneeBalanceAfter = new BigNumber(balancesAfter[1]);
+  //
+  //         return {
+  //           test:
+  //             "donee receives donation, payee receives payment minus donation",
+  //           result:
+  //             payeeBalanceAfter.equals(
+  //               payeeBalanceBefore.plus(payment).minus(donation)
+  //             ) && doneeBalanceAfter.equals(doneeBalanceBefore.plus(donation))
+  //         };
+  //       })(payment)(
+  //         await compileThenDeploy(
+  //           "../Y.sol",
+  //           "Y",
+  //           donationPercent.num,
+  //           donationPercent.denom
+  //         )()
+  //       )
+  //     )
+  //   )
+  // ); // FIXME "Error: Couldn't decode uint256 from ABI: 0x" https://github.com/ethereum/web3.js/issues/1089
 })();
